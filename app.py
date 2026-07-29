@@ -1,16 +1,18 @@
-import os
+  import os
 import pdfplumber
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 def procesar_pdf():
+    # Inicializar Tkinter de forma limpia
     root = tk.Tk()
     root.withdraw()
     root.attributes('-topmost', True)
 
+    # 1. Seleccionar archivo PDF
     pdf_path = filedialog.askopenfilename(
-        title="Selecciona el archivo PDF de liquidación",
+        title="Seleccioná el archivo PDF de liquidación SADAIC",
         filetypes=[("Archivos PDF", "*.pdf"), ("Todos los archivos", "*.*")]
     )
 
@@ -30,14 +32,15 @@ def procesar_pdf():
                     header_idx = -1
                     col_indices = {}
                     
+                    # Buscar la fila de encabezados
                     for i, row in enumerate(table):
                         row_str = " ".join([str(cell) for cell in row if cell is not None])
-                        if "Titulo Obra" in row_str or "Título Obra" in row_str:
+                        if "Titulo" in row_str or "Título" in row_str or "Obra" in row_str:
                             header_idx = i
                             for c_idx, cell in enumerate(row):
                                 if cell:
                                     cell_clean = str(cell).replace("\n", " ").strip()
-                                    if "Titulo" in cell_clean or "Título" in cell_clean:
+                                    if "Titulo" in cell_clean or "Título" in cell_clean or "Obra" in cell_clean:
                                         col_indices["titulo"] = c_idx
                                     elif "%" in cell_clean:
                                         col_indices["porcentaje"] = c_idx
@@ -47,13 +50,14 @@ def procesar_pdf():
                                         col_indices["neto"] = c_idx
                             break
 
+                    # Extraer datos
                     if header_idx != -1:
                         for row in table[header_idx + 1:]:
                             if not row or all(cell is None or cell == "" for cell in row):
                                 continue
                             
                             row_str = " ".join([str(c) for c in row if c])
-                            if "Titulo Obra" in row_str or "Total" in row_str:
+                            if "Titulo" in row_str or "Total" in row_str:
                                 continue
 
                             def get_val(key):
@@ -70,9 +74,13 @@ def procesar_pdf():
                             })
 
         if not data:
-            messagebox.showwarning("Sin datos", "No se encontraron tablas compatibles en el PDF seleccionado.")
+            messagebox.showwarning(
+                "Aviso de la aplicación", 
+                "Se abrió el PDF pero no se identificaron tablas con la estructura esperada (Título / % / Cant / Neto)."
+            )
             return
 
+        # 2. Elegir ruta para guardar
         nombre_sugerido = f"Liquidacion_{os.path.splitext(os.path.basename(pdf_path))[0]}.xlsx"
         
         output_excel = filedialog.asksaveasfilename(
@@ -89,10 +97,10 @@ def procesar_pdf():
         with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Liquidación")
 
-        messagebox.showinfo("¡Éxito!", f"El archivo se guardó correctamente en:\n{output_excel}")
+        messagebox.showinfo("¡Éxito!", f"El archivo Excel se guardó correctamente en:\n{output_excel}")
 
     except Exception as e:
-        messagebox.showerror("Error", f"Ocurrió un error al procesar el archivo:\n{str(e)}")
+        messagebox.showerror("Error inesperado", f"Ocurrió un error durante la lectura del PDF:\n{str(e)}")
 
 if __name__ == "__main__":
     procesar_pdf()
