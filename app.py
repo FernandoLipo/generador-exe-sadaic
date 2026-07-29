@@ -21,115 +21,105 @@ def procesar_pdf():
     data_liquidacion = []
     data_resumen = []
 
+    # Apellidos/Nombres conocidos que marcan el FIN del título de la obra
+    patron_corte_autores = r'\b(TAUZI|RAMIREZ|BARREIRO|LAURIA|URBANI|LOPEZ|GARCIA|GOMEZ|PEREZ|RODRIGUEZ|GONZALEZ|FERNANDEZ|MARTINEZ|SANCHEZ|ROMERO|SOUTO|ALVAREZ)\b'
+
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    if not table or len(table) < 2:
+                text = page.extract_text()
+                if not text:
+                    continue
+
+                lines = text.split('\n')
+                for line in lines:
+                    line_clean = line.strip()
+
+                    # Omitir encabezaos y subtotales
+                    if not line_clean or "Título Obra" in line_clean or "Titulo Obra" in line_clean or "Concepto:" in line_clean:
+                        continue
+                    if "Distribución" in line_clean or "Cambio Moneda" in line_clean or "Total" in line_clean:
                         continue
 
-                    header_idx = -1
-                    col_titulo = -1
-                    col_pct = -1
-                    col_cant = -1
-                    col_neto = -1
+                    # 1. BUSCAR PORCENTAJE (%) - ej: 12.50
+                    pct_match = re.search(r'(\d{1,3}\.\d{2})', line_clean)
+                    if not pct_match:
+                        continue
 
-                    # Identificar los índices exactos de cada columna en el encabezado
-                    for i, row in enumerate(table):
-                        row_clean = [str(c).replace('\n', ' ').strip() if c else '' for c in row]
-                        row_str = " ".join(row_clean)
+                    pct_val = pct_match.group(1).strip()
 
-                        if "Título Obra" in row_str or "Titulo Obra" in row_str:
-                            header_idx = i
-                            for c_idx, cell in enumerate(row_clean):
-                                if "Título" in cell or "Titulo" in cell or "Obra" in cell:
-                                    if col_titulo == -1:
-                                        col_titulo = c_idx
-                                elif "%" in cell:
-                                    col_pct = c_idx
-                                elif "Cant" in cell:
-                                    col_cant = c_idx
-                                elif "Neto" in cell:
-                                    col_neto = c_idx
-                            break
+                    # 2. SEPARAR TEXTO ANTES Y DESPUÉS DEL PORCENTAJE
+                    partes_pct = line_clean.split(pct_val, 1)
+                    texto_izq = partes_pct[0].strip()   # Contiene Título + Autor
+                    texto_der = partes_pct[1].strip() if len(partes_pct) > 1 else "" # Contiene Fechas, Local, Cant, Neto
 
-                    # Extraer únicamente los datos pertenecientes a cada columna
-                    if header_idx != -1 and col_titulo != -1:
-                        for row in table[header_idx + 1:]:
-                            if not row or all(cell is None or str(cell).strip() == "" for cell in row):
-                                continue
+                    # 3. EXTRAER TÍTULO OBRA (De la parte izquierda, cortando antes del nombre del autor)
+                    corte_match = re.search(patron_corte_autores, texto_izq, re.IGNORECASE)
+                    if corte_match:
+                        titulo_limpio = texto_izq[:corte_match.start()].strip()
+                    else:
+                        # Si no coincide con la lista, corta donde encuentre dos palabras seguidas en Mayúsculas/Cód
+                        titulo_limpio = re.split(r'\s+[A-ZÁÉÍÓÚÑ]{3,}\s+[A-ZÁÉÍÓÚÑ]{3,}', texto_izq)[0].strip()
 
-                            row_str = " ".join([str(c) for c in row if c])
-                            if "Título Obra" in row_str or "Titulo Obra" in row_str or "Total" in row_str or "Concepto:" in row_str:
-                                continue
+                    # Eliminar códigos numéricos sueltos si quedaron al final del título
+                    titulo_limpio = re.sub(r'\s+\d+$', '', titulo_limpio).strip()
 
-                            # 1. TÍTULO OBRA: Unificar renglones dobles de la celda y limpiar saltos de línea
-                            raw_titulo = str(row[col_titulo]) if col_titulo < len(row) and row[col_titulo] else ""
-                            titulo_limpio = " ".join(raw_titulo.split()).strip()
+                    if not titulo_limpio:
+                        continue
 
-                            if not titulo_limpio:
-                                continue
+                    # 4. EXTRAER CANTIDAD (De la parte derecha)
+                    cant_match = re.search(r'\b(\d{1,3})\s*-\s*', texto_der)
+                    if not cant_match:
+                        cant_match = re.search(r'\bAR\s+(\d{1,2})\b', texto_der)
+                    
+                    cant_val = cant_match.group(1).strip() if cant_match else "1"
 
-                            # 2. PORCENTAJE (%)
-                            pct_val = ""
-                            if col_pct != -1 and col_pct < len(row) and row[col_pct]:
-                                pct_val = str(row[col_pct]).replace('\n', ' ').strip()
-                            else:
-                                match_pct = re.search(r'(\d{1,3}\.\d{2})', row_str)
-                                pct_val = match_pct.group(1) if match_pct else ""
+                    # 5. EXTRAER NETO (De la parte derecha, aislando números y decimales antes de 'INCIDENTAL' u otros textos)
+                    neto_match = re.search(r'([\d\.,\-]+)(?:\s*[A-Z]+)?$', texto_der)
+                    if neto_match:
+                        neto_val = neto_match.group(1).strip()
+                    else:
+                        # Buscar cualquier número decimal al final
+                        neto_alt = re.findall(r'[\d\.,\-]+', texto_der)
+                        neto_val = neto_alt[-1] if neto_alt else "0.00"
 
-                            # 3. CANTIDAD
-                            cant_val = ""
-                            if col_cant != -1 and col_cant < len(row) and row[col_cant]:
-                                cant_val = str(row[col_cant]).replace('\n', ' ').strip()
-                            else:
-                                cant_val = "1"
+                    # 1. Pestaña "Liquidación" (Mantener formato tal cual)
+                    data_liquidacion.append({
+                        "Título Obra": titulo_limpio,
+                        "%": pct_val,
+                        "Cant.": cant_val,
+                        "Neto": neto_val
+                    })
 
-                            # 4. NETO
-                            neto_val = ""
-                            if col_neto != -1 and col_neto < len(row) and row[col_neto]:
-                                neto_val = str(row[col_neto]).replace('\n', ' ').strip()
-                            else:
-                                match_neto = re.search(r'([\d\.,\-]+)$', row_str)
-                                neto_val = match_neto.group(1) if match_neto else ""
+                    # 2. Pestaña "Resumen" (Convertir a número para sumar)
+                    try:
+                        neto_clean = re.sub(r'[^\d.-]', '', neto_val.replace('.', '').replace(',', '.'))
+                        neto_num = float(neto_clean) if neto_clean else 0.0
+                    except ValueError:
+                        neto_num = 0.0
 
-                            # Pestaña Liquidación (Valores exactos sin modificar)
-                            data_liquidacion.append({
-                                "Título Obra": titulo_limpio,
-                                "%": pct_val,
-                                "Cant.": cant_val,
-                                "Neto": neto_val
-                            })
+                    try:
+                        cant_num = int(cant_val)
+                    except ValueError:
+                        cant_num = 1
 
-                            # Pestaña Resumen (Conversión numérica para sumar)
-                            try:
-                                neto_num = float(neto_val.replace('.', '').replace(',', '.'))
-                            except ValueError:
-                                neto_num = 0.0
-
-                            try:
-                                cant_num = int(cant_val)
-                            except ValueError:
-                                cant_num = 1
-
-                            data_resumen.append({
-                                "Título Obra": titulo_limpio,
-                                "Cant.": cant_num,
-                                "Neto": neto_num
-                            })
+                    data_resumen.append({
+                        "Título Obra": titulo_limpio,
+                        "Cant.": cant_num,
+                        "Neto": neto_num
+                    })
 
         if not data_liquidacion:
             messagebox.showwarning(
                 "Aviso", 
-                "No se pudieron extraer los datos. Verificá que el PDF contenga las tablas de liquidación."
+                "No se pudieron extraer los datos del PDF."
             )
             return
 
         df_liquidacion = pd.DataFrame(data_liquidacion)
         df_res_base = pd.DataFrame(data_resumen)
 
-        # Hoja Resumen: Agrupar por Título Obra único y sumar Totales
+        # Agrupar por Título Obra único y sumar Totales
         df_resumen = df_res_base.groupby("Título Obra", as_index=False).agg({
             "Cant.": "sum",
             "Neto": "sum"
