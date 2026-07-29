@@ -29,88 +29,65 @@ def procesar_pdf():
                     continue
 
                 lines = text.split('\n')
-                i = 0
-                while i < len(lines):
-                    line_clean = lines[i].strip()
+                for line in lines:
+                    line_clean = line.strip()
 
-                    # Omitir encabezados, subtotales o líneas irrelevantes del PDF
+                    # Omitir líneas vacías, encabezados, subtotales o líneas irrelevantes
                     if not line_clean or "Título Obra" in line_clean or "Titulo Obra" in line_clean or "Concepto:" in line_clean:
-                        i += 1
                         continue
                     if "Distribución" in line_clean or "Cambio Moneda" in line_clean or "Total" in line_clean or "LIQ." in line_clean:
-                        i += 1
                         continue
 
-                    # 1. VERIFICAR SI TIENE PORCENTAJE (%)
-                    pct_match = re.search(r'(\d{1,3}\.\d{2})', line_clean)
+                    # 1. VERIFICAR SI TIENE PORCENTAJE DE PARTICIPACIÓN (%)
+                    pct_match = re.search(r'\b(\d{1,3}\.\d{2})\b', line_clean)
                     if not pct_match:
-                        i += 1
                         continue
 
                     pct_val = pct_match.group(1).strip()
 
-                    # 2. SEPARAR PARTE IZQUIERDA (Título + Autor) Y PARTE DERECHA (Cant + Neto)
+                    # Separar parte izquierda (Título + Autor/es) y parte derecha (Metadatos + Importes)
                     partes_pct = line_clean.split(pct_val, 1)
                     texto_izq = partes_pct[0].strip()
                     texto_der = partes_pct[1].strip() if len(partes_pct) > 1 else ""
 
-                    # 3. VERIFICAR SI EL TÍTULO CONTINÚA EN EL RENGLÓN DE ABAJO
-                    sub_titulo = ""
-                    if i + 1 < len(lines):
-                        siguiente_linea = lines[i + 1].strip()
-                        # Si el renglón de abajo NO tiene porcentaje %, ni es encabezado o total
-                        if siguiente_linea and not re.search(r'(\d{1,3}\.\d{2})', siguiente_linea) and not any(k in siguiente_linea for k in ["Concepto:", "Distribución", "Cambio Moneda", "Total"]):
-                            # Extraemos la parte del título del renglón de abajo cortando si aparecen autores
-                            sub_titulo = re.split(r'\s+[A-ZÁÉÍÓÚÑ]{3,}\s+[A-ZÁÉÍÓÚÑ]{3,}', siguiente_linea)[0].strip()
-
-                    # 4. EXTRAER TÍTULO DE LA PRIMERA LÍNEA CORTANDO ÚNICAMENTE DONDE EMPIEZAN LOS NOMBRES DE AUTORES
-                    # Se busca el patrón donde termina el título (palabra en MAYÚSCULAS/Números) y empiezan los Apellidos
-                    corte_autor = re.search(r'\s+([A-ZÁÉÍÓÚÑ]{3,}\s+[A-ZÁÉÍÓÚÑ]{3,}\s+[A-ZÁÉÍÓÚÑ]{3,}\s+E\s+\d+)', texto_izq)
+                    # 2. EXTRAER TÍTULO DE MANERA PRECISA
+                    # Buscamos la presencia del código de obra o indicador de tipo/rol ' E ' al final del bloque de autor
+                    # Los nombres de autor en SADAIC suelen estar en MAYÚSCULAS tras el título de la obra.
                     
-                    if corte_autor:
-                        tit_principal = texto_izq[:corte_autor.start()].strip()
+                    # Intentamos separar el título cortando donde empieza la secuencia del primer Autor
+                    # Formato típico: TITULO DE LA OBRA <APELLIDO NOMBRES> E <COD_OBRA>
+                    match_autor_e = re.search(r'\s+([A-ZÁÉÍÓÚÑ\s]+?)\s+E\b', texto_izq)
+                    
+                    if match_autor_e:
+                        # Si encontramos el bloque de autor antes de la 'E', tomamos todo lo que está antes como título
+                        titulo_limpio = texto_izq[:match_autor_e.start()].strip()
                     else:
-                        # Si no coincide la estructura exacta de socio, separar por doble espacio o secuencia de autor
+                        # Si la 'E' no está en la parte izquierda, cortamos por el primer salto de doble espacio
                         partes_espacio = re.split(r'\s{2,}', texto_izq)
-                        tit_principal = partes_espacio[0].strip()
+                        titulo_limpio = partes_espacio[0].strip()
 
-                    # Unir línea 1 y línea 2 si correspondía
-                    if sub_titulo and sub_titulo not in tit_principal:
-                        titulo_completo = f"{tit_principal} {sub_titulo}".strip()
-                    else:
-                        titulo_completo = tit_principal.strip()
+                    # Normalización de espacios múltiples en el título
+                    titulo_limpio = re.sub(r'\s+', ' ', titulo_limpio).strip()
 
-                    # Limpieza general
-                    titulo_limpio = re.sub(r'\s+', ' ', titulo_completo).strip()
-
-                    if not titulo_limpio or "Distribución" in titulo_limpio or "Cambio" in titulo_limpio:
-                        i += 1
+                    if not titulo_limpio or any(k in titulo_limpio for k in ["Distribución", "Cambio", "Total Concepto"]):
                         continue
 
-                    # 5. EXTRAER CANTIDAD
-                    cant_match = re.search(r'\b(\d{1,3})\s*-\s*', texto_der) or re.search(r'\bAR\s+(\d{1,2})\b', texto_der)
+                    # 3. EXTRAER CANTIDAD
+                    cant_match = re.search(r'\b(\d{1,3})\s*-\s*', texto_der) or re.search(r'\bAR\s+(\d{1,3})\b', texto_der)
                     cant_val = cant_match.group(1).strip() if cant_match else "1"
 
-                    # 6. EXTRAER NETO
-                    neto_match = re.search(r'([\d\.,\-]+)(?:\s*[A-Z]+)?$', texto_der)
+                    # 4. EXTRAER NETO
+                    neto_match = re.search(r'([\d\.,\-]+)$', texto_der)
                     if neto_match:
                         neto_val = neto_match.group(1).strip()
                     else:
                         neto_alt = re.findall(r'[\d\.,\-]+', texto_der)
                         neto_val = neto_alt[-1] if neto_alt else "0.00"
 
-                    # Hoja Liquidación
-                    data_liquidacion.append({
-                        "Título Obra": titulo_limpio,
-                        "%": pct_val,
-                        "Cant.": cant_val,
-                        "Neto": neto_val
-                    })
-
-                    # Hoja Resumen
+                    # Formatear montos y cantidades numéricas
                     try:
-                        neto_clean = re.sub(r'[^\d.-]', '', neto_val.replace('.', '').replace(',', '.'))
-                        neto_num = float(neto_clean) if neto_clean else 0.0
+                        neto_clean = neto_val.replace('.', '').replace(',', '.')
+                        neto_num = float(neto_clean)
                     except ValueError:
                         neto_num = 0.0
 
@@ -119,13 +96,20 @@ def procesar_pdf():
                     except ValueError:
                         cant_num = 1
 
+                    # Agregar registro detallado a Liquidación
+                    data_liquidacion.append({
+                        "Título Obra": titulo_limpio,
+                        "%": pct_val,
+                        "Cant.": cant_num,
+                        "Neto": neto_val
+                    })
+
+                    # Agregar registro acumulativo a Resumen
                     data_resumen.append({
                         "Título Obra": titulo_limpio,
                         "Cant.": cant_num,
                         "Neto": neto_num
                     })
-
-                    i += 1
 
         if not data_liquidacion:
             messagebox.showwarning("Aviso", "No se pudieron extraer los datos del PDF.")
@@ -134,7 +118,7 @@ def procesar_pdf():
         df_liquidacion = pd.DataFrame(data_liquidacion)
         df_res_base = pd.DataFrame(data_resumen)
 
-        # Agrupar por Título Obra único y sumar Totales
+        # Agrupar por Título Obra único y sumar Totales en la hoja de Resumen
         df_resumen = df_res_base.groupby("Título Obra", as_index=False).agg({
             "Cant.": "sum",
             "Neto": "sum"
