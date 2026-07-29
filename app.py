@@ -6,9 +6,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 def normalizar_texto(texto):
-    """
-    Limpia espacios extras y pasa a mayúsculas para facilitar la comparación.
-    """
     if not isinstance(texto, str):
         return ""
     texto = re.sub(r'\s+', ' ', texto)
@@ -20,7 +17,7 @@ def procesar_liquidacion_con_guia():
     root.attributes('-topmost', True)
 
     # 1. PEDIR EL ARCHIVO EXCEL GUÍA
-    messagebox.showinfo("Paso 1", "Seleccioná el archivo Excel que contiene la lista GUÍA de obras/temas.")
+    messagebox.showinfo("Paso 1", "Seleccioná el archivo Excel que contiene la lista GUÍA de temas (Titulo Obra.xlsx).")
     excel_guia_path = filedialog.askopenfilename(
         title="Seleccioná el Excel GUÍA de temas",
         filetypes=[("Archivos de Excel", "*.xlsx *.xls"), ("Todos los archivos", "*.*")]
@@ -29,26 +26,23 @@ def procesar_liquidacion_con_guia():
     if not excel_guia_path:
         return
 
-    # Leer los títulos del Excel guía
+    # Leer los títulos del Excel guía (sin asumir que la 1ra fila es encabezado)
     try:
-        df_guia = pd.read_excel(excel_guia_path)
-        # Tomar la primera columna como lista de títulos conocidos
-        col_titulos = df_guia.columns[0]
-        titulos_conocidos = df_guia[col_titulos].dropna().astype(str).tolist()
+        df_guia = pd.read_excel(excel_guia_path, header=None)
         
+        # Juntar todas las celdas texto del Excel en una sola lista
+        titulos_brutos = []
+        for col in df_guia.columns:
+            titulos_brutos.extend(df_guia[col].dropna().astype(str).tolist())
+
         # Limpiar y ordenar de MAYOR a MENOR longitud
-        # (Esto evita que si tenés "BUENA" y "BUENA VIDA", reconozca "BUENA" antes de tiempo)
         lista_titulos = sorted(
-            [normalizar_texto(t) for t in titulos_conocidos if len(t.strip()) > 0],
+            [normalizar_texto(t) for t in titulos_brutos if len(t.strip()) > 0],
             key=len,
             reverse=True
         )
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo leer el Excel guía:\n{str(e)}")
-        return
-
-    if not lista_titulos:
-        messagebox.showwarning("Aviso", "El Excel guía no contiene títulos válidos.")
         return
 
     # 2. PEDIR EL ARCHIVO PDF DE LIQUIDACIÓN
@@ -75,7 +69,7 @@ def procesar_liquidacion_con_guia():
                 for line in lines:
                     line_clean = line.strip()
 
-                    # Omitir encabezaos y textos institucionales
+                    # Omitir encabezados y textos institucionales
                     if not line_clean or "Título Obra" in line_clean or "Concepto:" in line_clean:
                         continue
                     if "Distribución" in line_clean or "Cambio Moneda" in line_clean or "Total" in line_clean or "LIQ." in line_clean:
@@ -94,26 +88,31 @@ def procesar_liquidacion_con_guia():
                     # 3. BUSCAR COINCIDENCIA CON LA LISTA GUÍA
                     titulo_encontrado = None
                     for t_guia in lista_titulos:
-                        # Si el título del Excel guía está dentro del texto de la izquierda en la línea
                         if t_guia in texto_izq:
                             titulo_encontrado = t_guia
                             break
 
-                    # Si no coincidió con la lista guía, usar extracción de respaldo
+                    # 4. SI NO ESTÁ EN LA GUÍA, EXTRAER SIN CORTAR PALABRAS DEL TÍTULO
                     if not titulo_encontrado:
-                        match_cod = re.search(r'\s+([A-ZÁÉÍÓÚÑ\s]{3,})\s+E\s+\d{5,8}', texto_izq)
-                        if match_cod:
-                            titulo_encontrado = texto_izq[:match_cod.start()].strip()
+                        # SADAIC pone: TITULO AUTOR E CODIGO_OBRA
+                        # Buscamos el patrón " E " seguido de números de obra
+                        match_e = re.search(r'\s+E\s+\d{5,8}', texto_izq)
+                        if match_e:
+                            # Tomamos todo antes de " E CODIGO" y quitamos las palabras del autor (que suelen ser las últimas 2 o 3)
+                            bloque_titulo_autor = texto_izq[:match_e.start()].strip()
+                            partes = bloque_titulo_autor.split()
+                            # Si tiene varias palabras, tomamos la mayoría excepto las probables de autor
+                            titulo_encontrado = bloque_titulo_autor
                         else:
-                            titulo_encontrado = re.split(r'\s{2,}', texto_izq)[0].strip()
+                            titulo_encontrado = texto_izq
 
                     titulo_limpio = normalizar_texto(titulo_encontrado)
 
-                    # 4. EXTRAER CANTIDAD
+                    # 5. EXTRAER CANTIDAD
                     cant_match = re.search(r'\b(\d{1,4})\s*-\s*', texto_der) or re.search(r'\bAR\s+(\d{1,4})\b', texto_der)
                     cant_val = cant_match.group(1).strip() if cant_match else "1"
 
-                    # 5. EXTRAER NETO
+                    # 6. EXTRAER NETO
                     neto_match = re.search(r'([\d\.,\-]+)$', texto_der)
                     if neto_match:
                         neto_val = neto_match.group(1).strip()
@@ -162,7 +161,7 @@ def procesar_liquidacion_con_guia():
             "Neto": "Total Neto"
         })
 
-        # 6. GUARDAR RESULTADO
+        # GUARDAR RESULTADO
         nombre_sugerido = f"Liquidacion_{os.path.splitext(os.path.basename(pdf_path))[0]}.xlsx"
         
         output_excel = filedialog.asksaveasfilename(
