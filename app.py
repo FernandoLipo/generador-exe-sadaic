@@ -5,11 +5,54 @@ import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-def procesar_pdf():
+def normalizar_texto(texto):
+    """
+    Limpia espacios extras y pasa a mayúsculas para facilitar la comparación.
+    """
+    if not isinstance(texto, str):
+        return ""
+    texto = re.sub(r'\s+', ' ', texto)
+    return texto.strip().upper()
+
+def procesar_liquidacion_con_guia():
     root = tk.Tk()
     root.withdraw()
     root.attributes('-topmost', True)
 
+    # 1. PEDIR EL ARCHIVO EXCEL GUÍA
+    messagebox.showinfo("Paso 1", "Seleccioná el archivo Excel que contiene la lista GUÍA de obras/temas.")
+    excel_guia_path = filedialog.askopenfilename(
+        title="Seleccioná el Excel GUÍA de temas",
+        filetypes=[("Archivos de Excel", "*.xlsx *.xls"), ("Todos los archivos", "*.*")]
+    )
+
+    if not excel_guia_path:
+        return
+
+    # Leer los títulos del Excel guía
+    try:
+        df_guia = pd.read_excel(excel_guia_path)
+        # Tomar la primera columna como lista de títulos conocidos
+        col_titulos = df_guia.columns[0]
+        titulos_conocidos = df_guia[col_titulos].dropna().astype(str).tolist()
+        
+        # Limpiar y ordenar de MAYOR a MENOR longitud
+        # (Esto evita que si tenés "BUENA" y "BUENA VIDA", reconozca "BUENA" antes de tiempo)
+        lista_titulos = sorted(
+            [normalizar_texto(t) for t in titulos_conocidos if len(t.strip()) > 0],
+            key=len,
+            reverse=True
+        )
+    except Exception as e:
+        messagebox.showerror("Error", f"No se pudo leer el Excel guía:\n{str(e)}")
+        return
+
+    if not lista_titulos:
+        messagebox.showwarning("Aviso", "El Excel guía no contiene títulos válidos.")
+        return
+
+    # 2. PEDIR EL ARCHIVO PDF DE LIQUIDACIÓN
+    messagebox.showinfo("Paso 2", "Seleccioná el archivo PDF de Liquidación SADAIC.")
     pdf_path = filedialog.askopenfilename(
         title="Seleccioná el archivo PDF de liquidación SADAIC",
         filetypes=[("Archivos PDF", "*.pdf"), ("Todos los archivos", "*.*")]
@@ -32,51 +75,45 @@ def procesar_pdf():
                 for line in lines:
                     line_clean = line.strip()
 
-                    # Omitir líneas vacías, encabezados, subtotales o líneas irrelevantes
-                    if not line_clean or "Título Obra" in line_clean or "Titulo Obra" in line_clean or "Concepto:" in line_clean:
+                    # Omitir encabezaos y textos institucionales
+                    if not line_clean or "Título Obra" in line_clean or "Concepto:" in line_clean:
                         continue
                     if "Distribución" in line_clean or "Cambio Moneda" in line_clean or "Total" in line_clean or "LIQ." in line_clean:
                         continue
 
-                    # 1. VERIFICAR SI TIENE PORCENTAJE DE PARTICIPACIÓN (%)
+                    # Verificar si la línea contiene un porcentaje de participación (%)
                     pct_match = re.search(r'\b(\d{1,3}\.\d{2})\b', line_clean)
                     if not pct_match:
                         continue
 
                     pct_val = pct_match.group(1).strip()
-
-                    # Separar parte izquierda (Título + Autor/es) y parte derecha (Metadatos + Importes)
                     partes_pct = line_clean.split(pct_val, 1)
-                    texto_izq = partes_pct[0].strip()
+                    texto_izq = normalizar_texto(partes_pct[0])
                     texto_der = partes_pct[1].strip() if len(partes_pct) > 1 else ""
 
-                    # 2. EXTRAER TÍTULO DE MANERA PRECISA
-                    # Buscamos la presencia del código de obra o indicador de tipo/rol ' E ' al final del bloque de autor
-                    # Los nombres de autor en SADAIC suelen estar en MAYÚSCULAS tras el título de la obra.
-                    
-                    # Intentamos separar el título cortando donde empieza la secuencia del primer Autor
-                    # Formato típico: TITULO DE LA OBRA <APELLIDO NOMBRES> E <COD_OBRA>
-                    match_autor_e = re.search(r'\s+([A-ZÁÉÍÓÚÑ\s]+?)\s+E\b', texto_izq)
-                    
-                    if match_autor_e:
-                        # Si encontramos el bloque de autor antes de la 'E', tomamos todo lo que está antes como título
-                        titulo_limpio = texto_izq[:match_autor_e.start()].strip()
-                    else:
-                        # Si la 'E' no está en la parte izquierda, cortamos por el primer salto de doble espacio
-                        partes_espacio = re.split(r'\s{2,}', texto_izq)
-                        titulo_limpio = partes_espacio[0].strip()
+                    # 3. BUSCAR COINCIDENCIA CON LA LISTA GUÍA
+                    titulo_encontrado = None
+                    for t_guia in lista_titulos:
+                        # Si el título del Excel guía está dentro del texto de la izquierda en la línea
+                        if t_guia in texto_izq:
+                            titulo_encontrado = t_guia
+                            break
 
-                    # Normalización de espacios múltiples en el título
-                    titulo_limpio = re.sub(r'\s+', ' ', titulo_limpio).strip()
+                    # Si no coincidió con la lista guía, usar extracción de respaldo
+                    if not titulo_encontrado:
+                        match_cod = re.search(r'\s+([A-ZÁÉÍÓÚÑ\s]{3,})\s+E\s+\d{5,8}', texto_izq)
+                        if match_cod:
+                            titulo_encontrado = texto_izq[:match_cod.start()].strip()
+                        else:
+                            titulo_encontrado = re.split(r'\s{2,}', texto_izq)[0].strip()
 
-                    if not titulo_limpio or any(k in titulo_limpio for k in ["Distribución", "Cambio", "Total Concepto"]):
-                        continue
+                    titulo_limpio = normalizar_texto(titulo_encontrado)
 
-                    # 3. EXTRAER CANTIDAD
-                    cant_match = re.search(r'\b(\d{1,3})\s*-\s*', texto_der) or re.search(r'\bAR\s+(\d{1,3})\b', texto_der)
+                    # 4. EXTRAER CANTIDAD
+                    cant_match = re.search(r'\b(\d{1,4})\s*-\s*', texto_der) or re.search(r'\bAR\s+(\d{1,4})\b', texto_der)
                     cant_val = cant_match.group(1).strip() if cant_match else "1"
 
-                    # 4. EXTRAER NETO
+                    # 5. EXTRAER NETO
                     neto_match = re.search(r'([\d\.,\-]+)$', texto_der)
                     if neto_match:
                         neto_val = neto_match.group(1).strip()
@@ -84,7 +121,7 @@ def procesar_pdf():
                         neto_alt = re.findall(r'[\d\.,\-]+', texto_der)
                         neto_val = neto_alt[-1] if neto_alt else "0.00"
 
-                    # Formatear montos y cantidades numéricas
+                    # Formatear números
                     try:
                         neto_clean = neto_val.replace('.', '').replace(',', '.')
                         neto_num = float(neto_clean)
@@ -96,7 +133,6 @@ def procesar_pdf():
                     except ValueError:
                         cant_num = 1
 
-                    # Agregar registro detallado a Liquidación
                     data_liquidacion.append({
                         "Título Obra": titulo_limpio,
                         "%": pct_val,
@@ -104,7 +140,6 @@ def procesar_pdf():
                         "Neto": neto_val
                     })
 
-                    # Agregar registro acumulativo a Resumen
                     data_resumen.append({
                         "Título Obra": titulo_limpio,
                         "Cant.": cant_num,
@@ -112,13 +147,13 @@ def procesar_pdf():
                     })
 
         if not data_liquidacion:
-            messagebox.showwarning("Aviso", "No se pudieron extraer los datos del PDF.")
+            messagebox.showwarning("Aviso", "No se pudieron extraer datos del PDF.")
             return
 
         df_liquidacion = pd.DataFrame(data_liquidacion)
         df_res_base = pd.DataFrame(data_resumen)
 
-        # Agrupar por Título Obra único y sumar Totales en la hoja de Resumen
+        # Agrupar resumen por obra
         df_resumen = df_res_base.groupby("Título Obra", as_index=False).agg({
             "Cant.": "sum",
             "Neto": "sum"
@@ -127,10 +162,11 @@ def procesar_pdf():
             "Neto": "Total Neto"
         })
 
+        # 6. GUARDAR RESULTADO
         nombre_sugerido = f"Liquidacion_{os.path.splitext(os.path.basename(pdf_path))[0]}.xlsx"
         
         output_excel = filedialog.asksaveasfilename(
-            title="¿Dónde querés guardar el archivo de Excel?",
+            title="¿Dónde querés guardar el archivo Excel resultante?",
             initialfile=nombre_sugerido,
             defaultextension=".xlsx",
             filetypes=[("Archivo de Excel", "*.xlsx")]
@@ -143,10 +179,10 @@ def procesar_pdf():
             df_liquidacion.to_excel(writer, index=False, sheet_name="Liquidación")
             df_resumen.to_excel(writer, index=False, sheet_name="Resumen")
 
-        messagebox.showinfo("¡Éxito!", f"El archivo Excel se generó correctamente en:\n{output_excel}")
+        messagebox.showinfo("¡Éxito!", f"El proceso finalizó correctamente.\nGuardado en:\n{output_excel}")
 
     except Exception as e:
-        messagebox.showerror("Error", f"Ocurrió un error al procesar el archivo:\n{str(e)}")
+        messagebox.showerror("Error", f"Ocurrió un error inesperado:\n{str(e)}")
 
 if __name__ == "__main__":
-    procesar_pdf()
+    procesar_liquidacion_con_guia()
