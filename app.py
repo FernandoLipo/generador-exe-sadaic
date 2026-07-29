@@ -1,16 +1,15 @@
-  import os
+import os
+import re
 import pdfplumber
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 def procesar_pdf():
-    # Inicializar Tkinter de forma limpia
     root = tk.Tk()
     root.withdraw()
     root.attributes('-topmost', True)
 
-    # 1. Seleccionar archivo PDF
     pdf_path = filedialog.askopenfilename(
         title="Seleccioná el archivo PDF de liquidación SADAIC",
         filetypes=[("Archivos PDF", "*.pdf"), ("Todos los archivos", "*.*")]
@@ -24,63 +23,75 @@ def procesar_pdf():
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                tables = page.extract_tables()
-                for table in tables:
-                    if not table or len(table) < 2:
+                text = page.extract_text()
+                if not text:
+                    continue
+
+                lines = text.split('\n')
+                for line in lines:
+                    line_clean = line.strip()
+
+                    if not line_clean or "Título Obra" in line_clean or "Titulo Obra" in line_clean or "Concepto:" in line_clean:
                         continue
-                    
-                    header_idx = -1
-                    col_indices = {}
-                    
-                    # Buscar la fila de encabezados
-                    for i, row in enumerate(table):
-                        row_str = " ".join([str(cell) for cell in row if cell is not None])
-                        if "Titulo" in row_str or "Título" in row_str or "Obra" in row_str:
-                            header_idx = i
-                            for c_idx, cell in enumerate(row):
-                                if cell:
-                                    cell_clean = str(cell).replace("\n", " ").strip()
-                                    if "Titulo" in cell_clean or "Título" in cell_clean or "Obra" in cell_clean:
-                                        col_indices["titulo"] = c_idx
-                                    elif "%" in cell_clean:
-                                        col_indices["porcentaje"] = c_idx
-                                    elif "Cant" in cell_clean:
-                                        col_indices["cantidad"] = c_idx
-                                    elif "Neto" in cell_clean:
-                                        col_indices["neto"] = c_idx
-                            break
 
-                    # Extraer datos
-                    if header_idx != -1:
-                        for row in table[header_idx + 1:]:
-                            if not row or all(cell is None or cell == "" for cell in row):
-                                continue
-                            
-                            row_str = " ".join([str(c) for c in row if c])
-                            if "Titulo" in row_str or "Total" in row_str:
-                                continue
+                    # Buscar Neto al final de la línea
+                    neto_match = re.search(r'([\d\.,\-]+(?:\w+)?)$', line_clean)
+                    # Buscar Porcentaje (%)
+                    porcentaje_match = re.search(r'(\d{1,3}\.\d{2})', line_clean)
 
-                            def get_val(key):
-                                idx = col_indices.get(key)
-                                if idx is not None and idx < len(row) and row[idx] is not None:
-                                    return str(row[idx]).strip()
-                                return ""
+                    if neto_match and porcentaje_match:
+                        neto_str = neto_match.group(1).strip()
+                        porcentaje = porcentaje_match.group(1).strip()
 
-                            data.append({
-                                "Título Obra": get_val("titulo"),
-                                "%": get_val("porcentaje"),
-                                "Cant.": get_val("cantidad"),
-                                "Neto": get_val("neto")
-                            })
+                        # Extraer Título Obra
+                        partes = re.split(r'\d{1,3}\.\d{2}', line_clean)
+                        titulo_raw = partes[0] if partes else line_clean
+                        titulo = re.sub(r'\s+[A-Z0-9]+$', '', titulo_raw).strip()
+
+                        # Extraer Cantidad
+                        cant_match = re.search(r'\s(\d{1,3})\s*-\s*', line_clean)
+                        cantidad_str = cant_match.group(1) if cant_match else "1"
+
+                        # Limpieza y conversión a valores numéricos para poder sumar en Excel
+                        try:
+                            # Quitar puntos de miles y reemplazar coma por punto si viniera formateado
+                            neto_clean = re.sub(r'[^\d.-]', '', neto_str.replace('.', '').replace(',', '.'))
+                            neto_val = float(neto_clean) if neto_clean else 0.0
+                        except ValueError:
+                            neto_val = 0.0
+
+                        try:
+                            cant_val = int(cantidad_str)
+                        except ValueError:
+                            cant_val = 1
+
+                        data.append({
+                            "Título Obra": titulo,
+                            "%": porcentaje,
+                            "Cant.": cant_val,
+                            "Neto": neto_val
+                        })
 
         if not data:
             messagebox.showwarning(
-                "Aviso de la aplicación", 
-                "Se abrió el PDF pero no se identificaron tablas con la estructura esperada (Título / % / Cant / Neto)."
+                "Aviso", 
+                "No se pudieron extraer datos del PDF seleccionando esa estructura."
             )
             return
 
-        # 2. Elegir ruta para guardar
+        # Crear DataFrames
+        df_detalle = pd.DataFrame(data)
+
+        # Crear Hoja de Resumen (Agrupado por Título Obra)
+        df_resumen = df_detalle.groupby("Título Obra", as_index=False).agg({
+            "Cant.": "sum",
+            "Neto": "sum"
+        }).rename(columns={
+            "Cant.": "Total Cant.",
+            "Neto": "Total Neto"
+        })
+
+        # Preguntar dónde guardar
         nombre_sugerido = f"Liquidacion_{os.path.splitext(os.path.basename(pdf_path))[0]}.xlsx"
         
         output_excel = filedialog.asksaveasfilename(
@@ -93,14 +104,15 @@ def procesar_pdf():
         if not output_excel:
             return
 
-        df = pd.DataFrame(data)
+        # Exportar ambas pestañas en el mismo archivo
         with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Liquidación")
+            df_detalle.to_excel(writer, index=False, sheet_name="Liquidación")
+            df_resumen.to_excel(writer, index=False, sheet_name="Resumen")
 
-        messagebox.showinfo("¡Éxito!", f"El archivo Excel se guardó correctamente en:\n{output_excel}")
+        messagebox.showinfo("¡Éxito!", f"El archivo Excel se generó correctamente en:\n{output_excel}")
 
     except Exception as e:
-        messagebox.showerror("Error inesperado", f"Ocurrió un error durante la lectura del PDF:\n{str(e)}")
+        messagebox.showerror("Error", f"Ocurrió un error al procesar el archivo:\n{str(e)}")
 
 if __name__ == "__main__":
     procesar_pdf()
