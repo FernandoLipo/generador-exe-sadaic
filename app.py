@@ -21,9 +21,6 @@ def procesar_pdf():
     data_liquidacion = []
     data_resumen = []
 
-    # Lista de autores/socios frecuentes para usar como límite estricto de corte
-    patron_autores = r'\b(TAUZI|RAMIREZ|BARREIRO|LAURIA|URBANI|LOPEZ|GARCIA|GOMEZ|PEREZ|RODRIGUEZ|GONZALEZ|FERNANDEZ|MARTINEZ|SANCHEZ|ROMERO|SOUTO|ALVAREZ)\b'
-
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
@@ -31,68 +28,87 @@ def procesar_pdf():
                 if not text:
                     continue
 
+                # Extraer las palabras de la página con sus coordenadas espaciales
+                words = page.extract_words()
+                if not words:
+                    continue
+
+                # Encontrar el encabezado "Título" / "Nombre" para determinar la frontera X exacta entre columnas
+                x_corte_nombre = 220.0  # Límite por defecto para el título en SADAIC
+                for w in words:
+                    if "Nombre" in w['text']:
+                        x_corte_nombre = w['x0'] - 5  # La columna Nombre empieza aquí
+                        break
+
                 lines = text.split('\n')
-                i = 0
-                while i < len(lines):
-                    line_clean = lines[i].strip()
+                for idx, line in enumerate(lines):
+                    line_clean = line.strip()
 
-                    # Omitir encabezados, subtotales o líneas irrelevantes
-                    if not line_clean or "Título Obra" in line_clean or "Titulo Obra" in line_clean or "Concepto:" in line_clean:
-                        i += 1
+                    # Ignorar encabezados o subtotales
+                    if not line_clean or "Título Obra" in line_clean or "Concepto:" in line_clean or "Total" in line_clean:
                         continue
-                    if "Distribución" in line_clean or "Cambio Moneda" in line_clean or "Total" in line_clean:
-                        i += 1
+                    if "Distribución" in line_clean or "Cambio Moneda" in line_clean:
                         continue
 
-                    # 1. VERIFICAR SI LA LÍNEA TIENE PORCENTAJE (%) Y MONTO
+                    # Verificar si la línea contiene un Porcentaje (%) de liquidación
                     pct_match = re.search(r'(\d{1,3}\.\d{2})', line_clean)
                     if not pct_match:
-                        i += 1
                         continue
 
                     pct_val = pct_match.group(1).strip()
+                    
+                    # Separar la parte derecha para Cantidad y Neto
+                    partes = line_clean.split(pct_val, 1)
+                    texto_der = partes[1].strip() if len(partes) > 1 else ""
 
-                    # Separar texto a la izquierda del porcentaje (Título + Autor) y a la derecha (Cant + Neto)
-                    partes_pct = line_clean.split(pct_val, 1)
-                    texto_izq = partes_pct[0].strip()
-                    texto_der = partes_pct[1].strip() if len(partes_pct) > 1 else ""
-
-                    # 2. EVALUAR SI EL TÍTULO CONTINÚA EN EL SIGUIENTE RENGLÓN
-                    # Miramos la línea siguiente si existe
-                    if i + 1 < len(lines):
-                        siguiente_linea = lines[i + 1].strip()
-                        # Si la siguiente línea NO tiene porcentaje % ni es encabezado, puede ser la continuación del título
-                        if siguiente_linea and not re.search(r'(\d{1,3}\.\d{2})', siguiente_linea) and not "Concepto:" in siguiente_linea:
-                            # Cortamos autores si los hubiera en la segunda línea
-                            corte_sig = re.search(patron_autores, siguiente_linea, re.IGNORECASE)
-                            sub_titulo = siguiente_linea[:corte_sig.start()].strip() if corte_sig else siguiente_linea
-                            
-                            # Si hay texto válido en el renglón de abajo, lo anexamos al título
-                            if len(sub_titulo) > 0:
-                                texto_izq = f"{texto_izq} {sub_titulo}"
-
-                    # 3. AISLAR EL TÍTULO LIMPIO (Cortar antes del nombre de los autores/socios)
-                    corte_match = re.search(patron_autores, texto_izq, re.IGNORECASE)
-                    if corte_match:
-                        titulo_limpio = texto_izq[:corte_match.start()].strip()
+                    # EXTRAER TÍTULO POR COORDENADAS ESPACIALES EN EL PDF
+                    # Buscamos todas las palabras en esa zona de la página que estén a la izquierda de 'Nombre'
+                    # y alineadas verticalmente con esta fila
+                    
+                    # 1. Palabras en la primera línea del título
+                    palabras_linea1 = [
+                        w['text'] for w in words 
+                        if w['x1'] <= x_corte_nombre and abs(w['top'] - line_y_approx(words, line_clean)) < 8
+                    ]
+                    
+                    # Fallback si no encuentra por coordenadas exactas
+                    if palabras_linea1:
+                        tit_part1 = " ".join(palabras_linea1).strip()
                     else:
-                        # Si no hay autor en la lista, corta donde encuentre dos palabras seguidas en Mayúsculas o código
-                        titulo_limpio = re.split(r'\s+[A-ZÁÉÍÓÚÑ]{3,}\s+[A-ZÁÉÍÓÚÑ]{3,}', texto_izq)[0].strip()
+                        tit_part1 = partes[0].strip()
 
-                    # Limpiar códigos numéricos finales si quedaron sueltos
-                    titulo_limpio = re.sub(r'\s+\d+$', '', titulo_limpio).strip()
+                    # 2. Verificar si hay un segundo renglón del título justo debajo
+                    tit_part2 = ""
+                    if idx + 1 < len(lines):
+                        siguiente_linea = lines[idx + 1].strip()
+                        # Si el renglón de abajo NO tiene porcentaje % ni es un concepto/encabezado
+                        if siguiente_linea and not re.search(r'(\d{1,3}\.\d{2})', siguiente_linea) and not "Concepto:" in siguiente_linea:
+                            # Filtramos las palabras del renglón de abajo que estén DENTRO de la columna Título
+                            palabras_linea2 = [
+                                w['text'] for w in words 
+                                if w['x1'] <= x_corte_nombre and abs(w['top'] - line_y_approx(words, siguiente_linea)) < 8
+                            ]
+                            if palabras_linea2:
+                                tit_part2 = " ".join(palabras_linea2).strip()
+
+                    # Construir el Título Obra Unificado y Completo
+                    if tit_part2:
+                        titulo_completo = f"{tit_part1} {tit_part2}".strip()
+                    else:
+                        titulo_completo = tit_part1.strip()
+
+                    # Limpieza final por si quedó alguna palabra duplicada o basura
+                    titulo_limpio = " ".join(titulo_completo.split()).strip()
 
                     if not titulo_limpio:
-                        i += 1
                         continue
 
-                    # 4. EXTRAER CANTIDAD
+                    # EXTRAER CANTIDAD Y NETO
                     cant_match = re.search(r'\b(\d{1,3})\s*-\s*', texto_der)
                     if not cant_match:
                         cant_match = re.search(r'\bAR\s+(\d{1,2})\b', texto_der)
                     cant_val = cant_match.group(1).strip() if cant_match else "1"
 
-                    # 5. EXTRAER NETO
                     neto_match = re.search(r'([\d\.,\-]+)(?:\s*[A-Z]+)?$', texto_der)
                     if neto_match:
                         neto_val = neto_match.group(1).strip()
@@ -100,7 +116,7 @@ def procesar_pdf():
                         neto_alt = re.findall(r'[\d\.,\-]+', texto_der)
                         neto_val = neto_alt[-1] if neto_alt else "0.00"
 
-                    # 1. Pestaña Liquidación (Tal cual en el PDF)
+                    # Agregar a Pestaña Liquidación
                     data_liquidacion.append({
                         "Título Obra": titulo_limpio,
                         "%": pct_val,
@@ -108,7 +124,7 @@ def procesar_pdf():
                         "Neto": neto_val
                     })
 
-                    # 2. Pestaña Resumen (Conversión a número para sumar)
+                    # Agregar a Pestaña Resumen
                     try:
                         neto_clean = re.sub(r'[^\d.-]', '', neto_val.replace('.', '').replace(',', '.'))
                         neto_num = float(neto_clean) if neto_clean else 0.0
@@ -126,19 +142,17 @@ def procesar_pdf():
                         "Neto": neto_num
                     })
 
-                    i += 1
-
         if not data_liquidacion:
             messagebox.showwarning(
                 "Aviso", 
-                "No se pudieron extraer datos válidos del PDF."
+                "No se pudieron extraer los datos del PDF."
             )
             return
 
         df_liquidacion = pd.DataFrame(data_liquidacion)
         df_res_base = pd.DataFrame(data_resumen)
 
-        # Agrupar por Título Obra único y sumar Totales
+        # Hoja Resumen: Agrupar por Título Obra único y sumar Totales
         df_resumen = df_res_base.groupby("Título Obra", as_index=False).agg({
             "Cant.": "sum",
             "Neto": "sum"
@@ -167,6 +181,14 @@ def procesar_pdf():
 
     except Exception as e:
         messagebox.showerror("Error", f"Ocurrió un error al procesar el archivo:\n{str(e)}")
+
+def line_y_approx(words, line_text):
+    """Encuentra la posición Y aproximada de una línea de texto"""
+    first_word = line_text.split()[0] if line_text.split() else ""
+    for w in words:
+        if w['text'] == first_word:
+            return w['top']
+    return 0.0
 
 if __name__ == "__main__":
     procesar_pdf()
