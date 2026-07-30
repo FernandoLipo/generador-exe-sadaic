@@ -11,14 +11,27 @@ def normalizar_texto(texto):
     texto = re.sub(r'\s+', ' ', texto)
     return texto.strip().upper()
 
-def invertir_puntos_comas(val_str):
+def convertir_a_numero(val_raw):
     """
-    Transforma formatos como '1,698.84' a '1.698,84'
-    intercambiando comas por puntos y puntos por comas.
+    Convierte cadenas como '1,698.84' o '81.89' a float (1698.84, 81.89)
+    para que Excel los entienda como números reales.
     """
-    if not isinstance(val_str, str):
-        val_str = str(val_str)
-    return val_str.replace(',', 'TEMP').replace('.', ',').replace('TEMP', '.')
+    if isinstance(val_raw, (int, float)):
+        return float(val_raw)
+    
+    val_str = str(val_raw).strip()
+    if not val_str:
+        return 0.0
+
+    # Quitar separadores de miles anglosajones y convertir a flotante
+    try:
+        if ',' in val_str and '.' in val_str:
+            val_str = val_str.replace(',', '')
+        elif ',' in val_str and '.' not in val_str:
+            val_str = val_str.replace(',', '.')
+        return float(val_str)
+    except ValueError:
+        return 0.0
 
 def procesar_liquidacion_con_guia():
     root = tk.Tk()
@@ -35,15 +48,12 @@ def procesar_liquidacion_con_guia():
     if not excel_guia_path:
         return
 
-    # Leer los títulos del Excel guía (header=None para no omitir la 1ra fila)
     try:
         df_guia = pd.read_excel(excel_guia_path, header=None)
-        
         titulos_brutos = []
         for col in df_guia.columns:
             titulos_brutos.extend(df_guia[col].dropna().astype(str).tolist())
 
-        # Ordenar de mayor a menor longitud
         lista_titulos = sorted(
             [normalizar_texto(t) for t in titulos_brutos if len(t.strip()) > 0],
             key=len,
@@ -77,13 +87,12 @@ def procesar_liquidacion_con_guia():
                 for line in lines:
                     line_clean = line.strip()
 
-                    # Omitir encabezados y textos institucionales
+                    # Omitir encabezados y líneas institucionales
                     if not line_clean or "Título Obra" in line_clean or "Concepto:" in line_clean:
                         continue
                     if "Distribución" in line_clean or "Cambio Moneda" in line_clean or "Total" in line_clean or "LIQ." in line_clean:
                         continue
 
-                    # Verificar si la línea contiene un porcentaje de participación (%)
                     pct_match = re.search(r'\b(\d{1,3}\.\d{2})\b', line_clean)
                     if not pct_match:
                         continue
@@ -93,14 +102,13 @@ def procesar_liquidacion_con_guia():
                     texto_izq = normalizar_texto(partes_pct[0])
                     texto_der = partes_pct[1].strip() if len(partes_pct) > 1 else ""
 
-                    # 3. BUSCAR COINCIDENCIA CON LA LISTA GUÍA
+                    # 3. BUSCAR TITULO
                     titulo_encontrado = None
                     for t_guia in lista_titulos:
                         if t_guia in texto_izq:
                             titulo_encontrado = t_guia
                             break
 
-                    # Si no está en la guía, extraer como respaldo
                     if not titulo_encontrado:
                         match_e = re.search(r'\s+E\s+\d{5,8}', texto_izq)
                         if match_e:
@@ -110,11 +118,11 @@ def procesar_liquidacion_con_guia():
 
                     titulo_limpio = normalizar_texto(titulo_encontrado)
 
-                    # 4. EXTRAER CANTIDAD
+                    # 4. CANTIDAD
                     cant_match = re.search(r'\b(\d{1,4})\s*-\s*', texto_der) or re.search(r'\bAR\s+(\d{1,4})\b', texto_der)
                     cant_val = cant_match.group(1).strip() if cant_match else "1"
 
-                    # 5. EXTRAER NETO Y FORMATO DE MONTOS
+                    # 5. NETO NUMÉRICO
                     neto_match = re.search(r'([\d\.,\-]+)$', texto_der)
                     if neto_match:
                         neto_raw = neto_match.group(1).strip()
@@ -122,15 +130,8 @@ def procesar_liquidacion_con_guia():
                         neto_alt = re.findall(r'[\d\.,\-]+', texto_der)
                         neto_raw = neto_alt[-1] if neto_alt else "0.00"
 
-                    # Formato visual para la hoja Liquidación (ej: "1,698.84" -> "1.698,84")
-                    neto_formateado = invertir_puntos_comas(neto_raw)
-
-                    # Cálculo numérico para la suma en el Resumen
-                    try:
-                        neto_clean = neto_raw.replace(',', '')
-                        neto_num = float(neto_clean)
-                    except ValueError:
-                        neto_num = 0.0
+                    # Convertir a número float puro
+                    neto_num = convertir_a_numero(neto_raw)
 
                     try:
                         cant_num = int(cant_val)
@@ -141,7 +142,7 @@ def procesar_liquidacion_con_guia():
                         "Título Obra": titulo_limpio,
                         "%": pct_val,
                         "Cant.": cant_num,
-                        "Neto": neto_formateado
+                        "Neto": neto_num
                     })
 
                     data_resumen.append({
@@ -157,7 +158,7 @@ def procesar_liquidacion_con_guia():
         df_liquidacion = pd.DataFrame(data_liquidacion)
         df_res_base = pd.DataFrame(data_resumen)
 
-        # Agrupar resumen por obra
+        # Agrupar resumen por obra y mantener neto numérico
         df_resumen = df_res_base.groupby("Título Obra", as_index=False).agg({
             "Cant.": "sum",
             "Neto": "sum"
@@ -166,10 +167,7 @@ def procesar_liquidacion_con_guia():
             "Neto": "Total Neto"
         })
 
-        # Dar formato con comas decimales al Total Neto del Resumen
-        df_resumen["Total Neto"] = df_resumen["Total Neto"].apply(lambda x: f"{x:,.2f}").apply(invertir_puntos_comas)
-
-        # 6. GUARDAR RESULTADO
+        # 6. GUARDAR CON FORMATO DE NÚMERO EXCEL
         nombre_sugerido = f"Liquidacion_{os.path.splitext(os.path.basename(pdf_path))[0]}.xlsx"
         
         output_excel = filedialog.asksaveasfilename(
@@ -185,6 +183,21 @@ def procesar_liquidacion_con_guia():
         with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
             df_liquidacion.to_excel(writer, index=False, sheet_name="Liquidación")
             df_resumen.to_excel(writer, index=False, sheet_name="Resumen")
+
+            # Aplicar formato de número a las celdas en openpyxl
+            workbook = writer.book
+            
+            # Formatear columna Neto en 'Liquidación' (Columna D)
+            ws_liq = workbook["Liquidación"]
+            for cell in ws_liq['D'][1:]:  # Omitir encabezado
+                if cell.value is not None:
+                    cell.number_format = '#,##0.00'
+
+            # Formatear columna Total Neto en 'Resumen' (Columna C)
+            ws_res = workbook["Resumen"]
+            for cell in ws_res['C'][1:]:  # Omitir encabezado
+                if cell.value is not None:
+                    cell.number_format = '#,##0.00'
 
         messagebox.showinfo("¡Éxito!", f"El proceso finalizó correctamente.\nGuardado en:\n{output_excel}")
 
