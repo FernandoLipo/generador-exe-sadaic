@@ -11,13 +11,22 @@ def normalizar_texto(texto):
     texto = re.sub(r'\s+', ' ', texto)
     return texto.strip().upper()
 
+def invertir_puntos_comas(val_str):
+    """
+    Transforma formatos como '1,698.84' a '1.698,84'
+    intercambiando comas por puntos y puntos por comas.
+    """
+    if not isinstance(val_str, str):
+        val_str = str(val_str)
+    return val_str.replace(',', 'TEMP').replace('.', ',').replace('TEMP', '.')
+
 def procesar_liquidacion_con_guia():
     root = tk.Tk()
     root.withdraw()
     root.attributes('-topmost', True)
 
     # 1. PEDIR EL ARCHIVO EXCEL GUÍA
-    messagebox.showinfo("Paso 1", "Seleccioná el archivo Excel que contiene la lista GUÍA de temas (Titulo Obra.xlsx).")
+    messagebox.showinfo("Paso 1", "Seleccioná el archivo Excel GUÍA de temas (Titulo Obra.xlsx).")
     excel_guia_path = filedialog.askopenfilename(
         title="Seleccioná el Excel GUÍA de temas",
         filetypes=[("Archivos de Excel", "*.xlsx *.xls"), ("Todos los archivos", "*.*")]
@@ -26,16 +35,15 @@ def procesar_liquidacion_con_guia():
     if not excel_guia_path:
         return
 
-    # Leer los títulos del Excel guía (sin asumir que la 1ra fila es encabezado)
+    # Leer los títulos del Excel guía (header=None para no omitir la 1ra fila)
     try:
         df_guia = pd.read_excel(excel_guia_path, header=None)
         
-        # Juntar todas las celdas texto del Excel en una sola lista
         titulos_brutos = []
         for col in df_guia.columns:
             titulos_brutos.extend(df_guia[col].dropna().astype(str).tolist())
 
-        # Limpiar y ordenar de MAYOR a MENOR longitud
+        # Ordenar de mayor a menor longitud
         lista_titulos = sorted(
             [normalizar_texto(t) for t in titulos_brutos if len(t.strip()) > 0],
             key=len,
@@ -92,37 +100,34 @@ def procesar_liquidacion_con_guia():
                             titulo_encontrado = t_guia
                             break
 
-                    # 4. SI NO ESTÁ EN LA GUÍA, EXTRAER SIN CORTAR PALABRAS DEL TÍTULO
+                    # Si no está en la guía, extraer como respaldo
                     if not titulo_encontrado:
-                        # SADAIC pone: TITULO AUTOR E CODIGO_OBRA
-                        # Buscamos el patrón " E " seguido de números de obra
                         match_e = re.search(r'\s+E\s+\d{5,8}', texto_izq)
                         if match_e:
-                            # Tomamos todo antes de " E CODIGO" y quitamos las palabras del autor (que suelen ser las últimas 2 o 3)
-                            bloque_titulo_autor = texto_izq[:match_e.start()].strip()
-                            partes = bloque_titulo_autor.split()
-                            # Si tiene varias palabras, tomamos la mayoría excepto las probables de autor
-                            titulo_encontrado = bloque_titulo_autor
+                            titulo_encontrado = texto_izq[:match_e.start()].strip()
                         else:
                             titulo_encontrado = texto_izq
 
                     titulo_limpio = normalizar_texto(titulo_encontrado)
 
-                    # 5. EXTRAER CANTIDAD
+                    # 4. EXTRAER CANTIDAD
                     cant_match = re.search(r'\b(\d{1,4})\s*-\s*', texto_der) or re.search(r'\bAR\s+(\d{1,4})\b', texto_der)
                     cant_val = cant_match.group(1).strip() if cant_match else "1"
 
-                    # 6. EXTRAER NETO
+                    # 5. EXTRAER NETO Y FORMATO DE MONTOS
                     neto_match = re.search(r'([\d\.,\-]+)$', texto_der)
                     if neto_match:
-                        neto_val = neto_match.group(1).strip()
+                        neto_raw = neto_match.group(1).strip()
                     else:
                         neto_alt = re.findall(r'[\d\.,\-]+', texto_der)
-                        neto_val = neto_alt[-1] if neto_alt else "0.00"
+                        neto_raw = neto_alt[-1] if neto_alt else "0.00"
 
-                    # Formatear números
+                    # Formato visual para la hoja Liquidación (ej: "1,698.84" -> "1.698,84")
+                    neto_formateado = invertir_puntos_comas(neto_raw)
+
+                    # Cálculo numérico para la suma en el Resumen
                     try:
-                        neto_clean = neto_val.replace('.', '').replace(',', '.')
+                        neto_clean = neto_raw.replace(',', '')
                         neto_num = float(neto_clean)
                     except ValueError:
                         neto_num = 0.0
@@ -136,7 +141,7 @@ def procesar_liquidacion_con_guia():
                         "Título Obra": titulo_limpio,
                         "%": pct_val,
                         "Cant.": cant_num,
-                        "Neto": neto_val
+                        "Neto": neto_formateado
                     })
 
                     data_resumen.append({
@@ -161,7 +166,10 @@ def procesar_liquidacion_con_guia():
             "Neto": "Total Neto"
         })
 
-        # GUARDAR RESULTADO
+        # Dar formato con comas decimales al Total Neto del Resumen
+        df_resumen["Total Neto"] = df_resumen["Total Neto"].apply(lambda x: f"{x:,.2f}").apply(invertir_puntos_comas)
+
+        # 6. GUARDAR RESULTADO
         nombre_sugerido = f"Liquidacion_{os.path.splitext(os.path.basename(pdf_path))[0]}.xlsx"
         
         output_excel = filedialog.asksaveasfilename(
